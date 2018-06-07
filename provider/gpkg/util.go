@@ -37,7 +37,8 @@ func replaceTokens(qtext string, zoom *uint, extent *[4]float64) string {
 			fmt.Sprintf("minx <= %v AND maxx >= %v AND miny <= %v AND maxy >= %v", maxx, minx, maxy, miny),
 		)
 	} else {
-
+		rps = append(rps, bboxToken)
+		rps = append(rps, "NULL IS NULL")
 	}
 
 	if zoom != nil {

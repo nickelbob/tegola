@@ -15,9 +15,9 @@ import (
 
 	"github.com/go-spatial/geom"
 	"github.com/go-spatial/tegola"
+	"github.com/go-spatial/tegola/internal/dict"
 	"github.com/go-spatial/tegola/internal/log"
 	"github.com/go-spatial/tegola/provider"
-	"github.com/go-spatial/tegola/util/dict"
 )
 
 func init() {
@@ -180,11 +180,10 @@ func featureTableMetaData(gpkg *sql.DB) (map[string]featureTableDetails, error) 
 	return geomTableDetails, nil
 }
 
-func NewTileProvider(config map[string]interface{}) (provider.Tiler, error) {
-	// parse our config
-	m := dict.M(config)
+func NewTileProvider(config dict.Dicter) (provider.Tiler, error) {
+	log.Infof("initializing gpkg TileProvider w/ config: %v", config)
 
-	filepath, err := m.String(ConfigKeyFilePath, nil)
+	filepath, err := config.String(ConfigKeyFilePath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -214,15 +213,13 @@ func NewTileProvider(config map[string]interface{}) (provider.Tiler, error) {
 		db:       db,
 	}
 
-	layers, ok := config[ConfigKeyLayers].([]map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("expected %v to be a []map[string]interface{}", ConfigKeyLayers)
+	layers, err := config.MapSlice(ConfigKeyLayers)
+	if err != nil {
+		return nil, err
 	}
 
 	lyrsSeen := make(map[string]int)
-	for i, v := range layers {
-
-		layerConf := dict.M(v)
+	for i, layerConf := range layers {
 
 		layerName, err := layerConf.String(ConfigKeyLayerName, nil)
 		if err != nil {
@@ -238,12 +235,22 @@ func NewTileProvider(config map[string]interface{}) (provider.Tiler, error) {
 		}
 		lyrsSeen[layerName] = i
 
-		if layerConf[ConfigKeyTableName] == nil && layerConf[ConfigKeySQL] == nil {
+		// ensure only one of sql or tablename exist
+		_, errTable := layerConf.String(ConfigKeyTableName, nil)
+		if _, ok := errTable.(dict.ErrKeyRequired); errTable != nil && !ok {
+			return nil, err
+		}
+		_, errSQL := layerConf.String(ConfigKeySQL, nil)
+		if _, ok := errSQL.(dict.ErrKeyRequired); errSQL != nil && !ok {
+			return nil, err
+		}
+		// err != nil <-> key != exists
+		if errTable != nil && errSQL != nil {
 			return nil, errors.New("'tablename' or 'sql' is required for a feature's config")
 		}
-
-		if layerConf[ConfigKeyTableName] != nil && layerConf[ConfigKeySQL] != nil {
-			return nil, errors.New("'tablename' or 'sql' is required for a feature's config. you have both")
+		// err == nil <-> key == exists
+		if errTable == nil && errSQL == nil {
+			return nil, errors.New("'tablename' or 'sql' is required for a feature's config")
 		}
 
 		idFieldname := DefaultIDFieldName
@@ -253,8 +260,8 @@ func NewTileProvider(config map[string]interface{}) (provider.Tiler, error) {
 		}
 
 		tagFieldnames, err := layerConf.StringSlice(ConfigKeyFields)
-		if err != nil {
-			return nil, fmt.Errorf("for layer (%v) %v %v field had the following error: %v", i, layerName, ConfigKeyFields, err)
+		if err != nil { // empty slices are okay
+			return nil, fmt.Errorf("for layer (%v) %v, %q field had the following error: %v", i, layerName, ConfigKeyFields, err)
 		}
 
 		// layer container. will be added to the provider after it's configured
@@ -262,7 +269,7 @@ func NewTileProvider(config map[string]interface{}) (provider.Tiler, error) {
 			name: layerName,
 		}
 
-		if layerConf[ConfigKeyTableName] != nil {
+		if errTable == nil { // layerConf[ConfigKeyTableName] exists
 			tablename, err := layerConf.String(ConfigKeyTableName, &idFieldname)
 			if err != nil {
 				return nil, fmt.Errorf("for layer (%v) %v : %v", i, layerName, err)
@@ -276,7 +283,7 @@ func NewTileProvider(config map[string]interface{}) (provider.Tiler, error) {
 			layer.srid = geomTableDetails[tablename].srid
 			layer.bbox = *geomTableDetails[tablename].bbox
 
-		} else {
+		} else { // layerConf[ConfigKeySQL] exists
 			var customSQL string
 			customSQL, err = layerConf.String(ConfigKeySQL, &customSQL)
 			if err != nil {
@@ -348,10 +355,8 @@ func NewTileProvider(config map[string]interface{}) (provider.Tiler, error) {
 	return &p, err
 }
 
-func NewFiltererProvider(config map[string]interface{}) (provider.Filterer, error) {
-	// parse our config
-	m := dict.M(config)
-	filepath, err := m.String(ConfigKeyFilePath, nil)
+func NewFiltererProvider(config dict.Dicter) (provider.Filterer, error) {
+	filepath, err := config.String(ConfigKeyFilePath, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -376,15 +381,15 @@ func NewFiltererProvider(config map[string]interface{}) (provider.Filterer, erro
 		db:       db,
 	}
 
-	layers, ok := config[ConfigKeyLayers].([]map[string]interface{})
-	if !ok {
+	layers, err := config.MapSlice(ConfigKeyLayers)
+	if err != nil {
 		return nil, fmt.Errorf("expected %v to be a []map[string]interface{}", ConfigKeyLayers)
 	}
 
 	lyrsSeen := make(map[string]int)
 	for i, v := range layers {
 
-		layerConf := dict.M(v)
+		layerConf := v
 
 		layerName, err := layerConf.String(ConfigKeyLayerName, nil)
 		if err != nil {
@@ -400,11 +405,21 @@ func NewFiltererProvider(config map[string]interface{}) (provider.Filterer, erro
 		}
 		lyrsSeen[layerName] = i
 
-		if layerConf[ConfigKeyTableName] == nil && layerConf[ConfigKeySQL] == nil {
+		var emptyString string = ""
+		tableName, err := layerConf.String(ConfigKeyTableName, &emptyString)
+		if err != nil {
+			return nil, fmt.Errorf("problem getting table name from config: %v", err)
+		}
+		layerSQL, err := layerConf.String(ConfigKeySQL, &emptyString)
+		if err != nil {
+			return nil, fmt.Errorf("problem getting sql from config: %v", err)
+		}
+
+		if tableName == "" && layerSQL == "" {
 			return nil, errors.New("'tablename' or 'sql' is required for a feature's config")
 		}
 
-		if layerConf[ConfigKeyTableName] != nil && layerConf[ConfigKeySQL] != nil {
+		if tableName != "" && layerSQL != "" {
 			return nil, errors.New("'tablename' or 'sql' is required for a feature's config. you have both")
 		}
 
@@ -435,7 +450,7 @@ func NewFiltererProvider(config map[string]interface{}) (provider.Filterer, erro
 			name: layerName,
 		}
 
-		if layerConf[ConfigKeyTableName] != nil {
+		if tableName != "" {
 			tablename, err := layerConf.String(ConfigKeyTableName, &idFieldname)
 			if err != nil {
 				return nil, fmt.Errorf("for layer (%v) %v : %v", i, layerName, err)
@@ -452,12 +467,7 @@ func NewFiltererProvider(config map[string]interface{}) (provider.Filterer, erro
 			layer.bbox = *geomTableDetails[tablename].bbox
 
 		} else {
-			var customSQL string
-			customSQL, err = layerConf.String(ConfigKeySQL, &customSQL)
-			if err != nil {
-				return nil, fmt.Errorf("for %v layer(%v) %v has an error: %v", i, layerName, ConfigKeySQL, err)
-			}
-			layer.sql = customSQL
+			layer.sql = layerSQL
 
 			// if a !ZOOM! token exists, all features could be filtered out so we don't have a geometry to inspect it's type.
 			// TODO(arolek): implement an SQL parser or figure out a different approach. this is brittle but I can't figure out a better
@@ -482,23 +492,23 @@ func NewFiltererProvider(config map[string]interface{}) (provider.Filterer, erro
 				"<"+zoomToken, allZoomsSQL,
 			)
 
-			customSQL = tokenReplacer.Replace(customSQL)
+			layerSQL = tokenReplacer.Replace(layerSQL)
 
 			// Set bounds & zoom params to include all layers
 			// Bounds checks need params: maxx, minx, maxy, miny
 			// TODO(arolek): this assumes WGS84. should be more flexible
 			wgs84ext := tegola.WGS84Bounds.Extent()
-			customSQL = replaceTokens(customSQL, nil, &wgs84ext)
+			layerSQL = replaceTokens(layerSQL, nil, &wgs84ext)
 
 			// Get geometry type & srid from geometry of first row.
-			qtext := fmt.Sprintf("SELECT geom FROM (%v) LIMIT 1;", customSQL)
+			qtext := fmt.Sprintf("SELECT geom FROM (%v) LIMIT 1;", layerSQL)
 
 			log.Debugf("qtext: %v", qtext)
 
 			var geomData []byte
 			err = db.QueryRow(qtext).Scan(&geomData)
 			if err == sql.ErrNoRows {
-				return nil, fmt.Errorf("layer '%v' with custom SQL has 0 rows: %v", layerName, customSQL)
+				return nil, fmt.Errorf("layer '%v' with custom SQL has 0 rows: %v", layerName, layerSQL)
 			} else if err != nil {
 				return nil, fmt.Errorf("layer '%v' problem executing custom SQL: %v", layerName, err)
 			}
