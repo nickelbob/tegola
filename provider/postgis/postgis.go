@@ -1,13 +1,17 @@
 package postgis
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx"
+	"github.com/pkg/errors"
 
 	"context"
 
@@ -51,6 +55,11 @@ const (
 	ConfigKeyDB          = "database"
 	ConfigKeyUser        = "user"
 	ConfigKeyPassword    = "password"
+	ConfigKeySSLMode     = "ssl_mode"
+	ConfigKeySSLKey      = "ssl_key"
+	ConfigKeySSLCert     = "ssl_cert"
+	ConfigKeySSLRootCert = "ssl_root_cert"
+	ConfigKeyServerName  = "server_name"
 	ConfigKeyMaxConn     = "max_connections"
 	ConfigKeySRID        = "srid"
 	ConfigKeyLayers      = "layers"
@@ -115,6 +124,11 @@ func NewTileProvider(config map[string]interface{}) (provider.Tiler, error) {
 		return nil, err
 	}
 
+	sslmode, err := c.String(ConfigKeySSLMode, nil)
+	sslkey, err := c.String(ConfigKeySSLKey, nil)
+	sslcert, err := c.String(ConfigKeySSLCert, nil)
+	sslrootcert, err := c.String(ConfigKeySSLRootCert, nil)
+
 	port := int64(DefaultPort)
 	if port, err = c.Int64(ConfigKeyPort, &port); err != nil {
 		return nil, err
@@ -130,16 +144,20 @@ func NewTileProvider(config map[string]interface{}) (provider.Tiler, error) {
 		return nil, err
 	}
 
+	connConfig := pgx.ConnConfig{
+		Host:     host,
+		Port:     uint16(port),
+		Database: db,
+		User:     user,
+		Password: password,
+	}
+
+	configTLS(sslmode, sslkey, sslcert, sslrootcert, &connConfig)
+
 	p := Provider{
 		srid: uint64(srid),
 		config: pgx.ConnPoolConfig{
-			ConnConfig: pgx.ConnConfig{
-				Host:     host,
-				Port:     uint16(port),
-				Database: db,
-				User:     user,
-				Password: password,
-			},
+			ConnConfig:     connConfig,
 			MaxConnections: int(maxcon),
 		},
 	}
@@ -256,6 +274,68 @@ func NewTileProvider(config map[string]interface{}) (provider.Tiler, error) {
 	p.layers = lyrs
 
 	return p, nil
+}
+
+func configTLS(sslMode string, sslKey string, sslCert string, sslRootCert string, cc *pgx.ConnConfig) error {
+	// Match libpq default behavior
+	if sslMode == "" {
+		sslMode = "prefer"
+	}
+
+	switch sslMode {
+	case "disable":
+		cc.UseFallbackTLS = false
+		cc.TLSConfig = nil
+		cc.FallbackTLSConfig = nil
+		return nil
+	case "allow":
+		cc.UseFallbackTLS = true
+		cc.FallbackTLSConfig = &tls.Config{InsecureSkipVerify: true}
+	case "prefer":
+		cc.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+		cc.UseFallbackTLS = true
+		cc.FallbackTLSConfig = nil
+	case "require":
+		cc.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	case "verify-ca", "verify-full":
+		cc.TLSConfig = &tls.Config{
+			ServerName: cc.Host,
+		}
+	default:
+		return errors.New("sslmode is invalid")
+	}
+
+	if sslRootCert != "" {
+		caCertPool := x509.NewCertPool()
+
+		caPath := sslRootCert
+		caCert, err := ioutil.ReadFile(caPath)
+		if err != nil {
+			return errors.Wrapf(err, "unable to read CA file %q", caPath)
+		}
+
+		if !caCertPool.AppendCertsFromPEM(caCert) {
+			return errors.Wrap(err, "unable to add CA to cert pool")
+		}
+
+		cc.TLSConfig.RootCAs = caCertPool
+		cc.TLSConfig.ClientCAs = caCertPool
+	}
+
+	if (sslCert != "" && sslKey == "") || (sslCert == "" && sslKey != "") {
+		return fmt.Errorf(`both "sslcert" and "sslkey" are required`)
+	}
+
+	if sslCert != "" && sslKey != "" {
+		cert, err := tls.LoadX509KeyPair(sslCert, sslKey)
+		if err != nil {
+			return errors.Wrap(err, "unable to read cert")
+		}
+
+		cc.TLSConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	return nil
 }
 
 //	layerGeomType sets the geomType field on the layer by running the SQL and reading the geom type in the result set
